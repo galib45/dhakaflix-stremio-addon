@@ -26,7 +26,7 @@ const manifest = {
 	"types": [
 		"series"
 	],
-	"name": "DhakaFlix",
+	"name": "dhakaflix",
 	"description": "DhakaFlix (SamOnline)",
 	"idPrefixes": [
 		"tt"
