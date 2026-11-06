@@ -1,10 +1,12 @@
 const { addonBuilder } = require("stremio-addon-sdk")
 const fs = require("fs");
 
-const lib = JSON.parse(fs.readFileSync("tv-series-library.json", "utf8"));
-const ids = JSON.parse(fs.readFileSync("tv-series-ids.json", "utf8"));
+const readJson = (p) => JSON.parse(fs.readFileSync(p, "utf8"));
 
-// imdb_id -> [show, ...]  (a show with several dirs gets several entries)
+// ---------- series (unchanged) ----------
+const lib = readJson("tv-series-library.json");
+const ids = readJson("tv-series-ids.json");
+
 const byImdb = new Map();
 let skipped = 0;
 for (const show of lib.shows) {
@@ -14,6 +16,32 @@ for (const show of lib.shows) {
   byImdb.get(imdb).push(show);
 }
 console.log(`Indexed ${byImdb.size} shows (${skipped} without imdb id)`);
+
+// ---------- movies ----------
+const MOVIE_LIBS = ["hindi-movies-library.json"]; // add more libraries here
+const movieByImdb = new Map();
+const movieByTmdb = new Map();
+const missingIds = [];
+let movieCount = 0;
+
+const addTo = (map, key, entry) => {
+  if (!map.has(key)) map.set(key, []);
+  map.get(key).push(entry);
+};
+
+for (const file of MOVIE_LIBS) {
+  const mlib = readJson(file);
+  for (const movie of mlib.movies) {
+    if (movie.imdb_id == null && movie.tmdb_id == null) {
+      missingIds.push({ file, title: movie.title, year: movie.year, dir: movie.dir });
+      continue;
+    }
+    const entry = { base_url: mlib.base_url, movie };
+    if (movie.imdb_id != null) addTo(movieByImdb, movie.imdb_id, entry);
+    if (movie.tmdb_id != null) addTo(movieByTmdb, String(movie.tmdb_id), entry);
+    movieCount++;
+  }
+}
 
 // Docs: https://github.com/Stremio/stremio-addon-sdk/blob/master/docs/api/responses/manifest.md
 const manifest = {
@@ -28,29 +56,38 @@ const manifest = {
 	],
 	"name": "dhakaflix",
 	"description": "DhakaFlix (SamOnline)",
-	// "idPrefixes": [
-	// 	"tmdb:"
-	// ]
+	"idPrefixes": [
+		"tt", "tmdb:", "kitsu:"
+	]
 }
 const builder = new addonBuilder(manifest)
 
-builder.defineStreamHandler(({ type, id }) => {
-  console.log(type, id);
-  if (type == "movie" && id == "tmdb:14395") return Promise.resolve({
-    streams: [
-      {
-        name: "DhakaFlix",
-        title: "Kabhi Alvida Naa Kehna (2006) Hindi 1080p BluRay x265 HEVC AAC 5.1 MSubs -Natty.mkv",
-        url: "http://172.16.50.14/DHAKA-FLIX-14/Hindi%20Movies/%282006%29/Kabhi%20Alvida%20Naa%20Kehna%20%282006%29%201080p/Kabhi%20Alvida%20Naa%20Kehna%20%282006%29%20Hindi%201080p%20BluRay%20x265%20HEVC%20AAC%205.1%20MSubs%20-Natty.mkv",
-        behaviorHints: { notWebReady: true },
-      }
-  ] });
-
-  const [imdb, season, episode] = id.split(":");
-  const shows = byImdb.get(imdb) ?? [];
+function movieStreams(entries) {
   const streams = [];
+  for (const { base_url, movie } of entries) {
+    for (const filename of movie.files) {
+      let title = filename;
+      try { title = decodeURIComponent(filename); } catch {}
+      streams.push({
+        name: "DhakaFlix",
+        title,
+        url: `${base_url}${movie.dir}/${filename}`,
+        behaviorHints: { notWebReady: true },
+      });
+    }
+  }
+  return streams;
+}
 
-  for (const show of shows) {
+function lookupMovie(id) {
+  if (id.startsWith("tmdb:")) return movieByTmdb.get(id.slice(5)) ?? [];
+  return movieByImdb.get(id) ?? [];
+}
+
+function seriesStreams(id) {
+  const [imdb, season, episode] = id.split(":");
+  const streams = [];
+  for (const show of byImdb.get(imdb) ?? []) {
     const paths = show.seasons?.[season]?.[episode] ?? [];
     for (const rel of paths) {
       const filename = rel.split("/").pop();
@@ -58,14 +95,18 @@ builder.defineStreamHandler(({ type, id }) => {
       try { title = decodeURIComponent(filename); } catch {}
       streams.push({
         name: "DhakaFlix",
-        title: `${title}\ndek ki lixi`,
+        description: title,
         url: `${lib.base_url}${show.dir}/${rel}`,
         behaviorHints: { notWebReady: true },
       });
     }
   }
+  return streams;
+}
 
-  console.log(`${id} -> ${streams.length} streams`);
+builder.defineStreamHandler(({ type, id }) => {
+  const streams = type === "movie" ? movieStreams(lookupMovie(id)) : seriesStreams(id);
+  console.log(`${type} ${id} -> ${streams.length} streams`);
   return Promise.resolve({ streams });
 });
 
